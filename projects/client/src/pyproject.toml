@@ -9,10 +9,13 @@ dependencies = [
     "dotenv>=0.9.9",
     "fastapi>=0.135.1",
     "langchain==1.2.11",
-    "langchain-aws>=1.4.0",
-    "langchain-mcp-adapters>=0.2.1",
     "langgraph-checkpoint-postgres>=3.0.4",
     "psycopg-binary>=3.3.3",
     "psycopg2>=2.9.11",
     "uvicorn>=0.41.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "langchain-aws>=1.9.1",
+    "langchain-mcp-adapters>=0.3.2",
 ]
+
