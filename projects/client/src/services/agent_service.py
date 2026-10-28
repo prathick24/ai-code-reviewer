@@ -8,110 +8,104 @@ from settings import HttpStatusCode
 from utils.exceptions.error_code import ErrorCode, ErrorCodeStatus
 from utils.exceptions.custom_app_exception import CustomAppException
 from utils.error_logs import log_error
-from utils.helper import get_llm, log_decorator,get_db_uri,logger
+from utils.helper import get_llm, log_decorator, get_db_uri, logger
 from Agents.code_agent import CodeAgent
 from Agents.review_agent import ReviewAgent
 from Agents.research_agent import ResearchAgent
 from Prompts.orchs_prompt import orches_prompt
 from langgraph.types import Command
+
+
 class State(TypedDict, total=False):
-   
     user_query: str
     username: str
     decision: str
-    AgentPath: str          
+    AgentPath: str
     Code: Optional[str]
     ReviewResponse: Optional[dict]
-    # IsReviewValid: Optional[bool]
-    # NeedsResearch: Optional[bool]  
     ResearchResponse: Optional[str]
-    # IsResearchCompleted: Optional[bool]  
+
 
 class AgentService:
 
+    def route_by_userquery(self, state: State) -> str:
+        route = state.get("decision", "").strip().lower()
+        if "research" in route:
+            return "node_research"
+        elif route == "review":
+            return "node_review"
+        elif route == "code":
+            return "node_code"
+        else:
+            return route if route else END
 
+    def route_after_review(self, state: State) -> str:
+        review = state.get("ReviewResponse") or {}
+        # Check flags if present in review structure
+        if isinstance(review, dict):
+            if review.get("IsReviewValid") is True and review.get("NeedsResearch") is False:
+                return END
+            if review.get("NeedsResearch") is True:
+                return "node_research"
+            if review.get("IsReviewValid") is False:
+                return "node_code"
+        # Fallback: if review exists and seems valid, end; else could loop
+        return END
 
-    # def route_by_userquery(self, state: State) -> str:
-  
-    #     route = state.get("decision", "").strip().lower()
-    #     if "research" in route:
-    #         return "node_research"
-    #     elif "review" in route:
-    #         return "node_review"
-    #     elif "code" in route:
-    #         return "node_code"
-    #     else :
-    #         return END
-    # def route_after_review(self, state: State) -> str:
-
-    #     if state.get("IsReviewValid"):
-    #         return END
-    #     if state.get("NeedsResearch"):
-    #         return "node_research"
-    #     return "node_code"
-
-    # def route_after_research(self, state: State) -> str:
-    
-    #     if state.get("IsResearchCompleted"):
-    #         return END
-    #     return "node_code" 
-
+    def route_after_research(self, state: State) -> str:
+        research = state.get("ResearchResponse")
+        if isinstance(research, dict):
+            if research.get("IsResearchCompleted") is True:
+                return END
+        # Default: if research done or not, often end or go to code as per flow
+        return END
 
     async def node_orchs(self, state: State) -> dict:
-  
         llm = get_llm(max_tokens=20, temperature=0)
         messages = [
             SystemMessage(content=orches_prompt),
             HumanMessage(content=state["user_query"]),
         ]
         response = llm.invoke(messages)
-        decision:dict = json.loads(response.content)
-        if "research" in decision["response"]: 
+        decision: dict = json.loads(response.content)
+        if "research" in str(decision.get("response", "")).lower():
             path = "node_research"
-        elif "review" == decision["response"]:
+        elif decision.get("response") == "review":
             path = "node_review"
-        elif "code" == decision["response"]:
+        elif decision.get("response") == "code":
             path = "node_code"
-        else :
-            path =decision["response"]
+        else:
+            path = decision.get("response", END)
 
-        print(f"[Orchestrator] decision ={decision['response']}")
-        return Command(update={"decision":decision["response"], "AgentPath": path},
+        print(f"[Orchestrator] decision ={decision.get('response')}")
+        return Command(update={"decision": decision.get("response"), "AgentPath": path},
                        goto=path)
-   
 
     async def node_code_agent(self, state: State) -> dict:
         code = await CodeAgent().create_coder_agent(state)
-        
-        return Command(update={"Code": code},
-                       goto="node_review" )
+        return Command(update={"Code": code}, goto="node_review")
 
     async def node_review_agent(self, state: State) -> dict:
         response, valid, needs_research = await ReviewAgent().create_review_agent(state)
+        goto = END
         if not valid:
-            Goto= "node_code"
-        if needs_research:
-            Goto= "node_research"
-        Goto= END
-        return Command(update={
-            "ReviewResponse": response
-        },
-        goto= Goto)
+            goto = "node_code"
+        elif needs_research:
+            goto = "node_research"
+        else:
+            goto = END
+        return Command(update={"ReviewResponse": response}, goto=goto)
 
     async def node_researcher_agent(self, state: State) -> dict:
         response, completed = await ResearchAgent().create_research_agent(state)
         if completed:
-            Goto= END
+            goto = END
         else:
-            Goto= "node_code" 
-        return Command(update={"ResearchResponse": response},
-                       goto= Goto)
-
-  
+            goto = "node_code"
+        return Command(update={"ResearchResponse": response}, goto=goto)
 
     @log_decorator
     async def chatbot_service(self, user_query: str, username: str) -> dict:
-       
         try:
             graph = StateGraph(State)
             graph.add_node("node_orchs", self.node_orchs)
@@ -128,15 +122,12 @@ class AgentService:
                     "node_code": "node_code",
                     "node_review": "node_review",
                     "node_research": "node_research",
-                    END:END,
+                    END: END,
                 },
             )
 
-           
             graph.add_edge("node_code", "node_review")
 
-            
-           
             graph.add_conditional_edges(
                 "node_review",
                 self.route_after_review,
@@ -147,7 +138,6 @@ class AgentService:
                 },
             )
 
-   
             graph.add_conditional_edges(
                 "node_research",
                 self.route_after_research,
@@ -157,23 +147,20 @@ class AgentService:
                 },
             )
 
-
-
             async with AsyncPostgresSaver.from_conn_string(get_db_uri()) as checkpointer:
                 await checkpointer.setup()
                 compiled = graph.compile(checkpointer=checkpointer)
                 agent_config = {"configurable": {"thread_id": username}}
-                print(f"[AgentService] Compiled graph — thread: {username}")
+                print(f"[AgentService] Compiled graph - thread: {username}")
                 data = await compiled.ainvoke(
                     {"user_query": user_query, "username": username},
                     config=agent_config,
                 )
-              
-                
+
                 async for snap in compiled.aget_state_history(agent_config):
-                   print(f"  step={snap.metadata['step']}  next={snap.next}  values={snap.values}")
+                    print(f"  step={snap.metadata.get('step')}  next={snap.next}  values={snap.values}")
             return {
-                "content" : data.get("decision"),
+                "content": data.get("decision"),
                 "code": data.get("Code"),
                 "review_response": data.get("ReviewResponse"),
                 "research_response": data.get("ResearchResponse"),
